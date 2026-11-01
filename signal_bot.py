@@ -75,16 +75,16 @@ def generate_signal(df):
     ma50 = last["ma50"]
     rsi = last["rsi"]
 
-    signal = "خنثی (بدون سیگنال)"
+    signal = "خنثی"
     reason = ""
 
-    # خرید کم‌ریسک: قیمت بالای MA50، RSI بین 50 و 70، تاییدیه کندل قبلی
+    # خرید کم‌ریسک
     if price > ma50 and 50 < rsi < 70:
         if prev["close"] > prev["ma50"]:
             signal = "🟢 خرید (Buy)"
             reason = f"قیمت ({price:,.0f}) بالای MA50 ({ma50:,.0f}) و RSI در محدوده سالم ({rsi:.1f})"
 
-    # فروش / خروج: قیمت زیر MA50 یا RSI در اشباع خرید
+    # فروش / خروج
     elif price < ma50 or rsi >= 70:
         signal = "🔴 فروش / خروج (Sell)"
         if price < ma50:
@@ -124,8 +124,6 @@ def main():
         print("دریافت داده ناموفق بود.")
         return
 
-    print(f"تعداد کندل دریافتی: {len(df)}")
-
     df = calculate_indicators(df)
     signal, reason = generate_signal(df)
 
@@ -135,7 +133,11 @@ def main():
     rsi = last["rsi"]
 
     print(f"سیگنال: {signal}")
-    print(f"قیمت: {price:,.0f} | MA50: {ma50:,.0f} | RSI: {rsi:.1f}")
+
+    # 🔥 این بخش جدید است: اگر سیگنال خنثی بود، ایمیل فرستاده نمی‌شود
+    if "خنثی" in signal:
+        print("سیگنال خنثی است. ایمیلی ارسال نشد.")
+        return
 
     subject = f"سیگنال روزانه {SYMBOL} | {signal}"
 
@@ -150,7 +152,6 @@ def main():
             .signal {{ font-size: 22px; font-weight: bold; text-align: center; margin: 16px 0; }}
             .buy {{ color: #0a8f3c; }}
             .sell {{ color: #c0392b; }}
-            .neutral {{ color: #888; }}
             .row {{ display: flex; justify-content: space-between; padding: 8px 0;
                     border-bottom: 1px solid #f0f0f0; }}
             .label {{ color: #666; }}
@@ -164,13 +165,13 @@ def main():
                 <h2>📊 سیگنال روزانه نوبیتکس</h2>
                 <p style="color:#666; margin:0;">{SYMBOL} — تایم‌فریم روزانه</p>
             </div>
-            <div class="signal {('buy' if 'خرید' in signal else 'sell' if 'فروش' in signal else 'neutral')}">
+            <div class="signal {('buy' if 'خرید' in signal else 'sell' if 'فروش' in signal else '')}">
                 {signal}
             </div>
             <div class="row"><span class="label">قیمت لحظه‌ای</span><span class="value">{price:,.0f} تومان</span></div>
             <div class="row"><span class="label">میانگین متحرک ۵۰ (MA50)</span><span class="value">{ma50:,.0f}</span></div>
             <div class="row"><span class="label">شاخص RSI (۱۴)</span><span class="value">{rsi:.1f}</span></div>
-            <div class="row"><span class="label">دلیل سیگنال</span><span class="value" style="direction:rtl; font-weight:normal;">{reason if reason else '—'}</span></div>
+            <div class="row"><span class="label">دلیل سیگنال</span><span class="value" style="direction:rtl; font-weight:normal;">{reason}</span></div>
             <div class="footer">
                 زمان تحلیل: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
                 این پیام به صورت خودکار تولید شده و توصیه مالی نیست.
