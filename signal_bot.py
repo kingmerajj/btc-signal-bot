@@ -6,17 +6,18 @@ import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from backtesting import Backtest, Strategy
 
-# ============ تنظیمات (از GitHub Secrets خوانده می‌شود) ============
+# ============ تنظیمات ============
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
 
-SYMBOL = "BTCIRT"          # بیت‌کوین به تومان
-RESOLUTION = "D"           # تایم‌فریم یک روزه
-CANDLE_COUNT = 200         # تعداد کندل برای تحلیل
+SYMBOL = "BTCIRT"
+RESOLUTION = "D"
+CANDLE_COUNT = 200
 
-# ============ دریافت داده از نوبیتکس ============
+# ============ دریافت داده‌های نوبیتکس (برای سیگنال امروز) ============
 def fetch_nobitex_candles(symbol, resolution, countback):
     url = "https://apiv2.nobitex.ir/market/udf/history"
     params = {
@@ -26,136 +27,147 @@ def fetch_nobitex_candles(symbol, resolution, countback):
         "countback": countback
     }
     headers = {"User-Agent": "TraderBot/1.0.0"}
-
     try:
         response = requests.get(url, params=params, headers=headers, timeout=15)
-        response.raise_for_status()
         data = response.json()
-
-        if data.get("s") != "ok":
-            print(f"خطا در دریافت داده: {data}")
-            return None
-
+        if data.get("s") != "ok": return None
         df = pd.DataFrame({
-            "timestamp": data["t"],
-            "open": data["o"],
-            "high": data["h"],
-            "low": data["l"],
-            "close": data["c"],
-            "volume": data["v"]
+            "timestamp": data["t"], "open": data["o"], "high": data["h"],
+            "low": data["l"], "close": data["c"], "volume": data["v"]
         })
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
         return df
     except Exception as e:
-        print(f"خطا در اتصال به نوبیتکس: {e}")
+        print(f"خطا در نوبیتکس: {e}")
         return None
 
-# ============ محاسبه اندیکاتورها ============
+# ============ دریافت داده‌های تاریخی بایننس (برای بک‌تست) ============
+def fetch_binance_historical_data():
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 1000}
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'CloseTime', 'QuoteAssetVolume', 'NumberTrades', 
+            'TakerBuyBaseAssetVolume', 'TakerBuyQuoteAssetVolume', 'Ignore'
+        ])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+        return df
+    except Exception as e:
+        print(f"خطا در بایننس: {e}")
+        return None
+
+# ============ استراتژی برای بک‌تست ============
+def rsi_func(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+class BtcSignalStrategy(Strategy):
+    def init(self):
+        self.ma50 = self.I(lambda x: pd.Series(x).rolling(50).mean(), self.data.Close)
+        self.rsi = self.I(rsi_func, self.data.Close)
+
+    def next(self):
+        if not self.position:
+            if self.data.Close[-1] > self.ma50[-1] and 50 < self.rsi[-1] < 70:
+                self.buy()
+        else:
+            if self.data.Close[-1] < self.ma50[-1] or self.rsi[-1] >= 70:
+                self.position.close()
+
+# ============ محاسبه اندیکاتورها برای سیگنال امروز ============
 def calculate_indicators(df):
     df["ma50"] = df["close"].rolling(window=50).mean()
-
-    delta = df["close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df["rsi"] = 100 - (100 / (1 + rs))
-
+    df["rsi"] = rsi_func(df["close"])
     return df
 
-# ============ تولید سیگنال ============
 def generate_signal(df):
     df_clean = df.dropna(subset=["ma50", "rsi"])
-    if len(df_clean) < 2:
-        return "داده کافی برای تحلیل وجود ندارد.", None
-
+    if len(df_clean) < 2: return "خنثی", ""
+    
     last = df_clean.iloc[-1]
     prev = df_clean.iloc[-2]
-
-    price = last["close"]
-    ma50 = last["ma50"]
-    rsi = last["rsi"]
-
-    signal = "خنثی"
-    reason = ""
-
-    # خرید کم‌ریسک
+    price, ma50, rsi = last["close"], last["ma50"], last["rsi"]
+    
+    signal, reason = "خنثی", ""
+    
     if price > ma50 and 50 < rsi < 70:
         if prev["close"] > prev["ma50"]:
             signal = "🟢 خرید (Buy)"
-            reason = f"قیمت ({price:,.0f}) بالای MA50 ({ma50:,.0f}) و RSI در محدوده سالم ({rsi:.1f})"
-
-    # فروش / خروج
+            reason = f"قیمت ({price:,.0f}) بالای MA50 ({ma50:,.0f}) و RSI ({rsi:.1f})"
     elif price < ma50 or rsi >= 70:
         signal = "🔴 فروش / خروج (Sell)"
-        if price < ma50:
-            reason = f"قیمت ({price:,.0f}) زیر MA50 ({ma50:,.0f})"
-        else:
-            reason = f"RSI وارد اشباع خرید شده ({rsi:.1f})"
-
+        reason = f"قیمت زیر MA50" if price < ma50 else f"RSI اشباع خرید ({rsi:.1f})"
     return signal, reason
 
 # ============ ارسال ایمیل ============
 def send_email(subject, html_body):
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECEIVER
+    msg["Subject"], msg["From"], msg["To"] = subject, EMAIL_SENDER, EMAIL_RECEIVER
     msg.attach(MIMEText(html_body, "html", "utf-8"))
-
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
-        print("ایمیل با موفقیت ارسال شد.")
+        print("ایمیل ارسال شد.")
     except Exception as e:
-        print(f"خطا در ارسال ایمیل: {e}")
+        print(f"خطا در ایمیل: {e}")
 
 # ============ اجرای اصلی ============
 def main():
-    print(f"[{datetime.now()}] دریافت داده‌های {SYMBOL} با تایم‌فریم روزانه...")
-
+    print(f"[{datetime.now()}] شروع تحلیل...")
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER]):
-        print("خطا: متغیرهای محیطی ایمیل تنظیم نشده‌اند.")
+        print("خطا: Secrets تنظیم نشده‌اند.")
         return
 
+    # ۱. اجرای بک‌تست
+    print("در حال گرفتن دیتای تاریخی برای بک‌تست...")
+    hist_df = fetch_binance_historical_data()
+    if hist_df is None: return
+
+    bt = Backtest(hist_df, BtcSignalStrategy, cash=100_000_000, commission=.002, exclusive_orders=True)
+    stats = bt.run()
+    
+    win_rate = stats['Win Rate [%]']
+    total_return = stats['Return [%]']
+    max_dd = stats['Max. Drawdown [%]']
+    
+    print(f"بک‌تست: سود {total_return:.1f}% | وین‌ریت {win_rate:.1f}% | دراودان {max_dd:.1f}%")
+
+    # ۲. گرفتن سیگنال امروز
     df = fetch_nobitex_candles(SYMBOL, RESOLUTION, CANDLE_COUNT)
-    if df is None:
-        print("دریافت داده ناموفق بود.")
-        return
-
+    if df is None: return
     df = calculate_indicators(df)
     signal, reason = generate_signal(df)
 
-    last = df.iloc[-1]
-    price = last["close"]
-    ma50 = last["ma50"]
-    rsi = last["rsi"]
-
-    print(f"سیگنال: {signal}")
-
-    # 🔥 این بخش جدید است: اگر سیگنال خنثی بود، ایمیل فرستاده نمی‌شود
+    # اگر خنثی بود، ایمیل نده
     if "خنثی" in signal:
         print("سیگنال خنثی است. ایمیلی ارسال نشد.")
         return
 
-    subject = f"سیگنال روزانه {SYMBOL} | {signal}"
-
+    # ۳. ساخت ایمیل (ترکیب سیگنال و نتایج بک‌تست)
+    subject = f"سیگنال {SYMBOL} | {signal}"
     html = f"""
     <html>
     <head>
         <style>
-            body {{ font-family: Tahoma, Arial, sans-serif; background: #f5f5f5; padding: 20px; }}
-            .card {{ background: #fff; border-radius: 12px; padding: 24px; max-width: 500px;
-                     margin: auto; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }}
+            body {{ font-family: Tahoma, sans-serif; background: #f5f5f5; padding: 20px; }}
+            .card {{ background: #fff; border-radius: 12px; padding: 24px; max-width: 500px; margin: auto; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }}
             .header {{ text-align: center; border-bottom: 2px solid #eee; padding-bottom: 12px; }}
             .signal {{ font-size: 22px; font-weight: bold; text-align: center; margin: 16px 0; }}
-            .buy {{ color: #0a8f3c; }}
-            .sell {{ color: #c0392b; }}
-            .row {{ display: flex; justify-content: space-between; padding: 8px 0;
-                    border-bottom: 1px solid #f0f0f0; }}
-            .label {{ color: #666; }}
-            .value {{ font-weight: bold; direction: ltr; }}
+            .buy {{ color: #0a8f3c; }} .sell {{ color: #c0392b; }}
+            .row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }}
+            .label {{ color: #666; }} .value {{ font-weight: bold; direction: ltr; }}
+            .backtest-box {{ background: #f9f9f9; border-radius: 8px; padding: 12px; margin-top: 16px; border: 1px dashed #ccc; }}
+            .backtest-title {{ font-size: 14px; color: #444; margin-bottom: 8px; text-align: center; font-weight: bold; }}
             .footer {{ margin-top: 20px; font-size: 12px; color: #999; text-align: center; }}
         </style>
     </head>
@@ -165,22 +177,27 @@ def main():
                 <h2>📊 سیگنال روزانه نوبیتکس</h2>
                 <p style="color:#666; margin:0;">{SYMBOL} — تایم‌فریم روزانه</p>
             </div>
-            <div class="signal {('buy' if 'خرید' in signal else 'sell' if 'فروش' in signal else '')}">
+            <div class="signal {('buy' if 'خرید' in signal else 'sell')}">
                 {signal}
             </div>
-            <div class="row"><span class="label">قیمت لحظه‌ای</span><span class="value">{price:,.0f} تومان</span></div>
-            <div class="row"><span class="label">میانگین متحرک ۵۰ (MA50)</span><span class="value">{ma50:,.0f}</span></div>
-            <div class="row"><span class="label">شاخص RSI (۱۴)</span><span class="value">{rsi:.1f}</span></div>
+            <div class="row"><span class="label">قیمت لحظه‌ای</span><span class="value">{df.iloc[-1]['close']:,.0f} تومان</span></div>
             <div class="row"><span class="label">دلیل سیگنال</span><span class="value" style="direction:rtl; font-weight:normal;">{reason}</span></div>
+            
+            <div class="backtest-box">
+                <div class="backtest-title">🧪 نتایج بک‌تست استراتژی (۳ سال گذشته)</div>
+                <div class="row"><span class="label">سود کل استراتژی</span><span class="value">{total_return:.1f}%</span></div>
+                <div class="row"><span class="label">درصد معاملات سودده</span><span class="value">{win_rate:.1f}%</span></div>
+                <div class="row"><span class="label">حداکثر افت سرمایه</span><span class="value">{max_dd:.1f}%</span></div>
+            </div>
+
             <div class="footer">
                 زمان تحلیل: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
-                این پیام به صورت خودکار تولید شده و توصیه مالی نیست.
+                این پیام خودکار است و توصیه مالی نیست.
             </div>
         </div>
     </body>
     </html>
     """
-
     send_email(subject, html)
 
 if __name__ == "__main__":
