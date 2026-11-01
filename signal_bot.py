@@ -41,24 +41,35 @@ def fetch_nobitex_candles(symbol, resolution, countback):
         print(f"خطا در نوبیتکس: {e}")
         return None
 
-# ============ دریافت داده‌های تاریخی بایننس (برای بک‌تست) ============
-def fetch_binance_historical_data():
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 1000}
+# ============ دریافت داده‌های تاریخی از CoinGecko (جایگزین بایننس) ============
+def fetch_coingecko_historical_data():
+    print("در حال دریافت دیتای تاریخی از CoinGecko...")
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {
+        "vs_currency": "usd",
+        "days": "365",    # یک سال گذشته
+        "interval": "daily"
+    }
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=20)
         data = response.json()
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'CloseTime', 'QuoteAssetVolume', 'NumberTrades', 
-            'TakerBuyBaseAssetVolume', 'TakerBuyQuoteAssetVolume', 'Ignore'
-        ])
+        
+        prices = data['prices'] # [timestamp, price]
+        
+        df = pd.DataFrame(prices, columns=['timestamp', 'Close'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
-        return df
+        
+        # چون CoinGecko فقط قیمت پایانی (Close) میده، بقیه رو مساوی Close می‌ذاریم
+        # برای استراتژی ما (که فقط Close رو چک می‌کنه) این کاملاً کافیه
+        df['Open'] = df['Close']
+        df['High'] = df['Close']
+        df['Low'] = df['Close']
+        df['Volume'] = 0
+        
+        return df[['Open', 'High', 'Low', 'Close', 'Volume']]
     except Exception as e:
-        print(f"خطا در بایننس: {e}")
+        print(f"خطا در CoinGecko: {e}")
         return None
 
 # ============ استراتژی برای بک‌تست ============
@@ -128,19 +139,19 @@ def main():
         print("خطا: Secrets تنظیم نشده‌اند.")
         return
 
-    # ۱. اجرای بک‌تست
-    print("در حال گرفتن دیتای تاریخی برای بک‌تست...")
-    hist_df = fetch_binance_historical_data()
-    if hist_df is None: return
-
-    bt = Backtest(hist_df, BtcSignalStrategy, cash=100_000_000, commission=.002, exclusive_orders=True)
-    stats = bt.run()
-    
-    win_rate = stats['Win Rate [%]']
-    total_return = stats['Return [%]']
-    max_dd = stats['Max. Drawdown [%]']
-    
-    print(f"بک‌تست: سود {total_return:.1f}% | وین‌ریت {win_rate:.1f}% | دراودان {max_dd:.1f}%")
+    # ۱. اجرای بک‌تست با دیتای CoinGecko
+    hist_df = fetch_coingecko_historical_data()
+    if hist_df is None or hist_df.empty:
+        print("دیتای تاریخی دریافت نشد. از بک‌تست رد می‌شویم.")
+        total_return, win_rate, max_dd = 0, 0, 0
+    else:
+        print("در حال اجرای بک‌تست...")
+        bt = Backtest(hist_df, BtcSignalStrategy, cash=100_000_000, commission=.002, exclusive_orders=True)
+        stats = bt.run()
+        win_rate = stats['Win Rate [%]']
+        total_return = stats['Return [%]']
+        max_dd = stats['Max. Drawdown [%]']
+        print(f"بک‌تست: سود {total_return:.1f}% | وین‌ریت {win_rate:.1f}% | دراودان {max_dd:.1f}%")
 
     # ۲. گرفتن سیگنال امروز
     df = fetch_nobitex_candles(SYMBOL, RESOLUTION, CANDLE_COUNT)
@@ -153,7 +164,7 @@ def main():
         print("سیگنال خنثی است. ایمیلی ارسال نشد.")
         return
 
-    # ۳. ساخت ایمیل (ترکیب سیگنال و نتایج بک‌تست)
+    # ۳. ساخت ایمیل
     subject = f"سیگنال {SYMBOL} | {signal}"
     html = f"""
     <html>
@@ -184,7 +195,7 @@ def main():
             <div class="row"><span class="label">دلیل سیگنال</span><span class="value" style="direction:rtl; font-weight:normal;">{reason}</span></div>
             
             <div class="backtest-box">
-                <div class="backtest-title">🧪 نتایج بک‌تست استراتژی (۳ سال گذشته)</div>
+                <div class="backtest-title">🧪 نتایج بک‌تست استراتژی (یک سال گذشته)</div>
                 <div class="row"><span class="label">سود کل استراتژی</span><span class="value">{total_return:.1f}%</span></div>
                 <div class="row"><span class="label">درصد معاملات سودده</span><span class="value">{win_rate:.1f}%</span></div>
                 <div class="row"><span class="label">حداکثر افت سرمایه</span><span class="value">{max_dd:.1f}%</span></div>
