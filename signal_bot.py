@@ -17,6 +17,15 @@ SYMBOL = "BTCIRT"
 RESOLUTION = "D"
 CANDLE_COUNT = 200
 
+# ============ تابع RSI (اصلاح شده برای بک‌تست) ============
+def rsi_func(series, period=14):
+    series = pd.Series(series)
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 # ============ دریافت داده‌های نوبیتکس (برای سیگنال امروز) ============
 def fetch_nobitex_candles(symbol, resolution, countback):
     url = "https://apiv2.nobitex.ir/market/udf/history"
@@ -41,27 +50,25 @@ def fetch_nobitex_candles(symbol, resolution, countback):
         print(f"خطا در نوبیتکس: {e}")
         return None
 
-# ============ دریافت داده‌های تاریخی از CoinGecko (جایگزین بایننس) ============
+# ============ دریافت داده‌های تاریخی از CoinGecko ============
 def fetch_coingecko_historical_data():
     print("در حال دریافت دیتای تاریخی از CoinGecko...")
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
     params = {
         "vs_currency": "usd",
-        "days": "365",    # یک سال گذشته
+        "days": "365",
         "interval": "daily"
     }
     try:
         response = requests.get(url, params=params, timeout=20)
         data = response.json()
         
-        prices = data['prices'] # [timestamp, price]
+        prices = data['prices']
         
         df = pd.DataFrame(prices, columns=['timestamp', 'Close'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         
-        # چون CoinGecko فقط قیمت پایانی (Close) میده، بقیه رو مساوی Close می‌ذاریم
-        # برای استراتژی ما (که فقط Close رو چک می‌کنه) این کاملاً کافیه
         df['Open'] = df['Close']
         df['High'] = df['Close']
         df['Low'] = df['Close']
@@ -73,13 +80,6 @@ def fetch_coingecko_historical_data():
         return None
 
 # ============ استراتژی برای بک‌تست ============
-def rsi_func(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
 class BtcSignalStrategy(Strategy):
     def init(self):
         self.ma50 = self.I(lambda x: pd.Series(x).rolling(50).mean(), self.data.Close)
@@ -139,7 +139,6 @@ def main():
         print("خطا: Secrets تنظیم نشده‌اند.")
         return
 
-    # ۱. اجرای بک‌تست با دیتای CoinGecko
     hist_df = fetch_coingecko_historical_data()
     if hist_df is None or hist_df.empty:
         print("دیتای تاریخی دریافت نشد. از بک‌تست رد می‌شویم.")
@@ -153,18 +152,15 @@ def main():
         max_dd = stats['Max. Drawdown [%]']
         print(f"بک‌تست: سود {total_return:.1f}% | وین‌ریت {win_rate:.1f}% | دراودان {max_dd:.1f}%")
 
-    # ۲. گرفتن سیگنال امروز
     df = fetch_nobitex_candles(SYMBOL, RESOLUTION, CANDLE_COUNT)
     if df is None: return
     df = calculate_indicators(df)
     signal, reason = generate_signal(df)
 
-    # اگر خنثی بود، ایمیل نده
     if "خنثی" in signal:
         print("سیگنال خنثی است. ایمیلی ارسال نشد.")
         return
 
-    # ۳. ساخت ایمیل
     subject = f"سیگنال {SYMBOL} | {signal}"
     html = f"""
     <html>
