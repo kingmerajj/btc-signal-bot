@@ -2,14 +2,14 @@ name: BTC Daily Signal Bot
 
 on:
   schedule:
-    # هر روز ساعت 08:00 UTC = 11:30 به وقت تهران
-    # (ساعت UTC رو با توجه به ساعت دلخواهت تنظیم کن)
     - cron: '0 8 * * *'
-  workflow_dispatch:   # امکان اجرای دستی از تب Actions
+  workflow_dispatch:
 
 jobs:
   run-signal:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # این خط اجازه کامیت کردن رو به ربات می‌ده
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,3 +29,11 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
         run: python signal_bot.py
+
+      - name: Commit signal memory
+        run: |
+          git config --global user.name 'Signal Bot'
+          git config --global user.email 'bot@example.com'
+          git add last_signal.txt
+          git commit -m "Update last signal memory" || echo "No changes to commit"
+          git push
