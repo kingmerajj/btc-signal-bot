@@ -15,7 +15,8 @@ EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
 
 SYMBOL = "BTCIRT"
 RESOLUTION = "D"
-CANDLE_COUNT = 250 # افزایش دادیم تا MA200 هم داده کافی داشته باشه
+CANDLE_COUNT = 250 
+MEMORY_FILE = "last_signal.txt" # فایل حافظه ربات
 
 # ============ تابع RSI ============
 def rsi_func(series, period=14):
@@ -25,6 +26,17 @@ def rsi_func(series, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
+
+# ============ توابع خواندن و نوشتن حافظه ============
+def read_last_signal():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return "None"
+
+def save_last_signal(signal):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write(signal)
 
 # ============ دریافت داده‌های نوبیتکس ============
 def fetch_nobitex_candles(symbol, resolution, countback):
@@ -58,34 +70,30 @@ def fetch_coingecko_historical_data():
         df['Open'] = df['Close']
         df['High'] = df['Close']
         df['Low'] = df['Close']
-        df['Volume'] = 1 # برای بک‌تست فعلاً حجم فیک می‌ذاریم تا خطا نده
+        df['Volume'] = 1 
         return df[['Open', 'High', 'Low', 'Close', 'Volume']]
     except Exception as e:
         print(f"خطا در CoinGecko: {e}")
         return None
 
-# ============ استراتژی جدید برای بک‌تست ============
-class BtcSignalStrategy(Strategy):
+# ============ استراتژی بک‌تست ============
+class BacktestStrategy(Strategy):
     def init(self):
         self.ma50 = self.I(lambda x: pd.Series(x).rolling(50).mean(), self.data.Close)
-        self.ma200 = self.I(lambda x: pd.Series(x).rolling(200).mean(), self.data.Close)
         self.rsi = self.I(rsi_func, self.data.Close)
-
     def next(self):
         if not self.position:
-            # شرط خرید جدید: قیمت بالای MA50 و MA200 باشد (روند صعودی) + RSI سالم
-            if self.data.Close[-1] > self.ma50[-1] and self.data.Close[-1] > self.ma200[-1] and 50 < self.rsi[-1] < 70:
+            if self.data.Close[-1] > self.ma50[-1] and 50 < self.rsi[-1] < 70:
                 self.buy()
         else:
-            # شرط فروش جدید: قیمت زیر MA50 برود یا RSI اشباع خرید شود
             if self.data.Close[-1] < self.ma50[-1] or self.rsi[-1] >= 70:
                 self.position.close()
 
-# ============ محاسبه اندیکاتورها برای سیگنال امروز ============
+# ============ محاسبه اندیکاتورها ============
 def calculate_indicators(df):
     df["ma50"] = df["close"].rolling(window=50).mean()
     df["ma200"] = df["close"].rolling(window=200).mean()
-    df["vol_ma20"] = df["volume"].rolling(window=20).mean() # میانگین حجم
+    df["vol_ma20"] = df["volume"].rolling(window=20).mean()
     df["rsi"] = rsi_func(df["close"])
     return df
 
@@ -100,13 +108,10 @@ def generate_signal(df):
     
     signal, reason = "خنثی", ""
     
-    # استراتژی خرید: قیمت بالای MA50 و MA200 + حجم بالاتر از میانگین + RSI بین 50 تا 70
     if price > ma50 and price > ma200 and volume > vol_ma20 and 50 < rsi < 70:
         if prev["close"] > prev["ma50"]:
             signal = "🟢 خرید (Buy)"
-            reason = f"قیمت ({price:,.0f}) بالای MA50 ({ma50:,.0f}) و MA200 ({ma200:,.0f}) | RSI ({rsi:.1f}) | حجم بالا"
-    
-    # استراتژی فروش: قیمت زیر MA50 یا RSI بالای 70
+            reason = f"قیمت ({price:,.0f}) بالای MA50 و MA200 | RSI ({rsi:.1f}) | حجم بالا"
     elif price < ma50 or rsi >= 70:
         signal = "🔴 فروش / خروج (Sell)"
         reason = f"قیمت زیر MA50" if price < ma50 else f"RSI اشباع خرید ({rsi:.1f})"
@@ -134,46 +139,37 @@ def main():
         print("خطا: Secrets تنظیم نشده‌اند.")
         return
 
-    # ۱. بک‌تست
+    # ۱. خواندن حافظه
+    last_signal_sent = read_last_signal()
+    print(f"آخرین سیگنال ارسال شده: {last_signal_sent}")
+
+    # ۲. بک‌تست
     hist_df = fetch_coingecko_historical_data()
     if hist_df is None or hist_df.empty:
         total_return, win_rate, max_dd = 0, 0, 0
     else:
-        # نکته: چون دیتای CoinGecko برای یک سال است، MA200 نیاز به داده بیشتری دارد
-        # برای جلوگیری از خطا، تعداد روزهای دریافتی را بالا می‌بریم
-        # (CoinGecko با days="max" هم کار می‌کند، اما برای رایگان محدودیت دارد)
-        # فعلاً با همان ۳۶۵ روز کار می‌کنیم و MA200 را برای بک‌تست نادیده می‌گیریم
-        # برای اینکه استراتژی MA200 را در بک‌تست داشته باشیم، به داده بیشتری نیاز است
-        # (فعلاً بک‌تست را با MA50 انجام می‌دهیم و MA200 فقط روی سیگنال زنده اعمال می‌شود)
-        
-        # برای بک‌تست دقیق، از یک کلاس استراتژی ساده‌تر استفاده می‌کنیم
-        class BacktestStrategy(Strategy):
-            def init(self):
-                self.ma50 = self.I(lambda x: pd.Series(x).rolling(50).mean(), self.data.Close)
-                self.rsi = self.I(rsi_func, self.data.Close)
-            def next(self):
-                if not self.position:
-                    if self.data.Close[-1] > self.ma50[-1] and 50 < self.rsi[-1] < 70:
-                        self.buy()
-                else:
-                    if self.data.Close[-1] < self.ma50[-1] or self.rsi[-1] >= 70:
-                        self.position.close()
-
         bt = Backtest(hist_df, BacktestStrategy, cash=100_000_000, commission=.002, exclusive_orders=True)
         stats = bt.run()
         win_rate, total_return, max_dd = stats['Win Rate [%]'], stats['Return [%]'], stats['Max. Drawdown [%]']
 
-    # ۲. سیگنال زنده
+    # ۳. سیگنال زنده
     df = fetch_nobitex_candles(SYMBOL, RESOLUTION, CANDLE_COUNT)
     if df is None: return
     df = calculate_indicators(df)
     signal, reason = generate_signal(df)
 
+    print(f"سیگنال جدید: {signal}")
+
+    # ۴. منطق حافظه (بررسی تکراری بودن)
     if "خنثی" in signal:
         print("سیگنال خنثی است. ایمیلی ارسال نشد.")
         return
 
-    # ۳. ارسال ایمیل
+    if signal == last_signal_sent:
+        print(f"سیگنال ({signal}) تکراری است و قبلاً ارسال شده. ایمیلی ارسال نشد.")
+        return
+
+    # ۵. ارسال ایمیل و ذخیره در حافظه
     subject = f"سیگنال {SYMBOL} | {signal}"
     html = f"""
     <html>
@@ -219,6 +215,10 @@ def main():
     </html>
     """
     send_email(subject, html)
+    
+    # ذخیره سیگنال جدید در حافظه
+    save_last_signal(signal)
+    print("سیگنال در حافظه ذخیره شد.")
 
 if __name__ == "__main__":
     main()
